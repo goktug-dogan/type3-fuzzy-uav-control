@@ -167,3 +167,28 @@ if __name__ == "__main__":
     print("b1 =", model.b1)
     print("b2 =", model.b2)
     print("b3 =", model.b3)
+
+    print("\n--- Hover sanity check ---")
+
+
+    hover_state = np.zeros(8)
+
+    # At zero roll/pitch angles, thrust equal to m*g
+    # should exactly compensate gravity.
+    hover_thrust = model.p.m * model.p.g
+
+    hover_dx = model.state_derivative(
+        hover_state,
+        u1=hover_thrust,
+        u2=0.0,
+        u3=0.0,
+        u4=0.0,
+    )
+
+    print("Hover thrust:", hover_thrust)
+    print("State derivative at hover:")
+    print(hover_dx)
+
+    assert np.allclose(hover_dx, np.zeros(8), atol=1e-10)
+
+    print("Hover test PASSED.")
