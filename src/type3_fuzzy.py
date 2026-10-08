@@ -27,30 +27,44 @@ class Type3MembershipFunction:
     sigma_left: float
     sigma_right: float
 
-    def _base_membership(self, x):
+    def _normalized_distance(self, x):
         """
-        Piecewise triangular base membership.
+        Compute normalized distance from the MF center.
+
+        Inside the membership support:
+            distance is in [0, 1]
+
+        Outside the support:
+            returns None
         """
 
         x = float(x)
 
         if self.sigma_left <= 0 or self.sigma_right <= 0:
-            raise ValueError("Sigma values must be positive.")
+            raise ValueError(
+                "Sigma values must be positive."
+            )
 
+        # Outside left support
         if x <= self.center - self.sigma_left:
-            return 0.0
+            return None
 
+        # Left side of center
         if x <= self.center:
-            return 1.0 - (
-                abs(x - self.center) / self.sigma_left
+            return (
+                abs(x - self.center)
+                / self.sigma_left
             )
 
+        # Right side of center
         if x <= self.center + self.sigma_right:
-            return 1.0 - (
-                abs(x - self.center) / self.sigma_right
+            return (
+                abs(x - self.center)
+                / self.sigma_right
             )
 
-        return 0.0
+        # Outside right support
+        return None
 
     def memberships(
         self,
@@ -84,28 +98,34 @@ class Type3MembershipFunction:
                 "0 < lambda_lower <= lambda_upper <= 1."
             )
 
-        base = self._base_membership(x)
+        distance = self._normalized_distance(x)
 
-        if base <= 0.0:
+        # Outside MF support
+        if distance is None:
             return np.zeros(4)
 
+        # Eqs. (19)-(22)
         upper_at_upper_slice = (
-            base ** lambda_upper
+            1.0
+            - distance ** lambda_upper
         )
 
         upper_at_lower_slice = (
-            base ** lambda_lower
+            1.0
+            - distance ** lambda_lower
         )
 
         lower_at_upper_slice = (
-            base ** (1.0 / lambda_upper)
+            1.0
+            - distance ** (1.0 / lambda_upper)
         )
 
         lower_at_lower_slice = (
-            base ** (1.0 / lambda_lower)
+            1.0
+            - distance ** (1.0 / lambda_lower)
         )
 
-        return np.array(
+        memberships = np.array(
             [
                 upper_at_upper_slice,
                 upper_at_lower_slice,
@@ -115,15 +135,24 @@ class Type3MembershipFunction:
             dtype=float,
         )
 
+        # Numerical safety
+        return np.clip(
+            memberships,
+            0.0,
+            1.0,
+        )
+
 
 def rule_firing_strength(membership_values):
     """
-    Product inference corresponding to Eqs. (23)-(26).
+    Product inference corresponding to
+    Eqs. (23)-(26).
 
     membership_values shape:
         (n_inputs, 4)
 
-    Returns four firing strengths for one rule.
+    Returns:
+        Four firing-strength values for one rule.
     """
 
     values = np.asarray(
@@ -140,7 +169,10 @@ def rule_firing_strength(membership_values):
             "(n_inputs, 4)."
         )
 
-    return np.prod(values, axis=0)
+    return np.prod(
+        values,
+        axis=0,
+    )
 
 
 def slice_consequent_output(
@@ -152,8 +184,14 @@ def slice_consequent_output(
     Compute G values for a single slice,
     following Eqs. (28)-(29).
 
-    firing_strengths:
-        shape (n_rules, 4)
+    firing_strengths shape:
+        (n_rules, 4)
+
+    Columns:
+        0 -> upper membership at upper slice
+        1 -> upper membership at lower slice
+        2 -> lower membership at upper slice
+        3 -> lower membership at lower slice
     """
 
     firing_strengths = np.asarray(
@@ -195,13 +233,17 @@ def slice_consequent_output(
 
     # Upper lambda slice
     numerator_upper = np.sum(
-        firing_strengths[:, 0] * upper_weights
-        + firing_strengths[:, 2] * lower_weights
+        firing_strengths[:, 0]
+        * upper_weights
+        +
+        firing_strengths[:, 2]
+        * lower_weights
     )
 
     denominator_upper = np.sum(
         firing_strengths[:, 0]
-        + firing_strengths[:, 2]
+        +
+        firing_strengths[:, 2]
     )
 
     G_upper = (
@@ -211,13 +253,17 @@ def slice_consequent_output(
 
     # Lower lambda slice
     numerator_lower = np.sum(
-        firing_strengths[:, 1] * upper_weights
-        + firing_strengths[:, 3] * lower_weights
+        firing_strengths[:, 1]
+        * upper_weights
+        +
+        firing_strengths[:, 3]
+        * lower_weights
     )
 
     denominator_lower = np.sum(
         firing_strengths[:, 1]
-        + firing_strengths[:, 3]
+        +
+        firing_strengths[:, 3]
     )
 
     G_lower = (
@@ -238,8 +284,7 @@ def type3_output(
     Aggregate all z-slices according to Eq. (27).
 
     slice_firing_strengths:
-        list/array with one (n_rules, 4)
-        firing-strength matrix per slice.
+        One (n_rules, 4) matrix per slice.
 
     slice_pairs:
         [
@@ -269,19 +314,22 @@ def type3_output(
     ):
         G_lower, G_upper = (
             slice_consequent_output(
-                firing,
-                lower_weights,
-                upper_weights,
+                firing_strengths=firing,
+                lower_weights=lower_weights,
+                upper_weights=upper_weights,
             )
         )
 
         numerator += (
             lambda_lower * G_lower
-            + lambda_upper * G_upper
+            +
+            lambda_upper * G_upper
         )
 
         denominator += (
-            lambda_lower + lambda_upper
+            lambda_lower
+            +
+            lambda_upper
         )
 
     if denominator <= 0.0:
@@ -293,6 +341,7 @@ def type3_output(
 
 
 if __name__ == "__main__":
+
     mf = Type3MembershipFunction(
         center=0.0,
         sigma_left=1.0,
@@ -302,44 +351,82 @@ if __name__ == "__main__":
     lambda_lower = 0.5
     lambda_upper = 1.0
 
-    center_membership = mf.memberships(
-        0.0,
-        lambda_lower,
-        lambda_upper,
-    )
+    # --------------------------------------------------
+    # Test 1: Center
+    # --------------------------------------------------
 
-    half_membership = mf.memberships(
-        0.5,
-        lambda_lower,
-        lambda_upper,
-    )
-
-    outside_membership = mf.memberships(
-        2.0,
-        lambda_lower,
-        lambda_upper,
+    center_membership = (
+        mf.memberships(
+            0.0,
+            lambda_lower,
+            lambda_upper,
+        )
     )
 
     print("Membership at center:")
     print(center_membership)
-
-    print("\nMembership at x = 0.5:")
-    print(half_membership)
-
-    print("\nMembership outside support:")
-    print(outside_membership)
 
     assert np.allclose(
         center_membership,
         np.ones(4),
     )
 
+    # --------------------------------------------------
+    # Test 2: x = 0.5
+    # --------------------------------------------------
+
+    half_membership = (
+        mf.memberships(
+            0.5,
+            lambda_lower,
+            lambda_upper,
+        )
+    )
+
+    print("\nMembership at x = 0.5:")
+    print(half_membership)
+
+    expected_half_membership = np.array(
+        [
+            0.5,
+            0.2928932188134524,
+            0.5,
+            0.75,
+        ]
+    )
+
+    assert np.allclose(
+        half_membership,
+        expected_half_membership,
+        atol=1e-10,
+    )
+
+    # --------------------------------------------------
+    # Test 3: Outside support
+    # --------------------------------------------------
+
+    outside_membership = (
+        mf.memberships(
+            2.0,
+            lambda_lower,
+            lambda_upper,
+        )
+    )
+
+    print(
+        "\nMembership outside support:"
+    )
+    print(outside_membership)
+
     assert np.allclose(
         outside_membership,
         np.zeros(4),
     )
 
-    # Example two-input rule
+    # --------------------------------------------------
+    # Test 4: Rule firing
+    # --------------------------------------------------
+
     mf_a = mf.memberships(
         0.25,
         lambda_lower,
@@ -353,19 +440,37 @@ if __name__ == "__main__":
     )
 
     firing = rule_firing_strength(
-        np.vstack([mf_a, mf_b])
+        np.vstack(
+            [
+                mf_a,
+                mf_b,
+            ]
+        )
     )
 
-    print("\nExample rule firing:")
+    print(
+        "\nExample rule firing:"
+    )
     print(firing)
 
     assert firing.shape == (4,)
-    assert np.all(firing >= 0.0)
-    assert np.all(firing <= 1.0)
 
-    # Aggregation sanity check:
-    # If both consequent bounds are 2,
-    # fuzzy output must also be 2.
+    assert np.all(
+        firing >= 0.0
+    )
+
+    assert np.all(
+        firing <= 1.0
+    )
+
+    # --------------------------------------------------
+    # Test 5: Type-3 aggregation
+    # --------------------------------------------------
+    #
+    # If every consequent weight is 2,
+    # fuzzy output should also be 2.
+    # --------------------------------------------------
+
     firing_matrix = np.vstack(
         [
             firing,
@@ -374,11 +479,17 @@ if __name__ == "__main__":
     )
 
     lower_weights = np.array(
-        [2.0, 2.0]
+        [
+            2.0,
+            2.0,
+        ]
     )
 
     upper_weights = np.array(
-        [2.0, 2.0]
+        [
+            2.0,
+            2.0,
+        ]
     )
 
     output = type3_output(
@@ -395,7 +506,9 @@ if __name__ == "__main__":
         ],
     )
 
-    print("\nExample Type-3 output:")
+    print(
+        "\nExample Type-3 output:"
+    )
     print(output)
 
     assert np.isclose(
@@ -405,5 +518,6 @@ if __name__ == "__main__":
     )
 
     print(
-        "\nType-3 fuzzy inference test PASSED."
+        "\nType-3 fuzzy inference "
+        "test PASSED."
     )
