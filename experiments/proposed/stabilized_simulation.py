@@ -5,14 +5,17 @@ from src.reference_trajectory import ConstantReference
 
 from src.tracking import (
     tracking_errors,
-    sliding_surfaces,
 )
 
 from src.adaptive_controller import (
     AdaptiveParameters,
     AdaptiveEstimates,
-    compute_kappa,
     adaptation_derivatives,
+)
+
+from src.proposed_tracking import (
+    proposed_sliding_surfaces,
+    compute_proposed_kappa,
 )
 
 from src.fuzzy_compensator import (
@@ -46,7 +49,7 @@ def run_stabilized_simulation(
         dtype=float,
     )
 
-    integral_s = np.zeros(
+    integral_error = np.zeros(
         4,
         dtype=float,
     )
@@ -78,10 +81,10 @@ def run_stabilized_simulation(
             t,
         )
 
-        s = sliding_surfaces(
-            e_position,
-            e_velocity,
-            integral_s,
+        s = proposed_sliding_surfaces(
+            e_position=e_position,
+            e_velocity=e_velocity,
+            integral_error=integral_error,
             alpha=(
                 adaptive_params.alpha_surface
             ),
@@ -90,14 +93,19 @@ def run_stabilized_simulation(
             ),
         )
 
-        kappa = compute_kappa(
+        kappa = compute_proposed_kappa(
+            e_position=e_position,
             e_velocity=e_velocity,
-            s=s,
             reference_acceleration=(
                 reference.acceleration(t)
             ),
             g=model.p.g,
-            params=adaptive_params,
+            alpha=(
+                adaptive_params.alpha_surface
+            ),
+            k=(
+                adaptive_params.k_surface
+            ),
         )
 
         (
@@ -187,9 +195,9 @@ def run_stabilized_simulation(
             + dt * state_dot
         )
 
-        integral_s = (
-            integral_s
-            + dt * s
+        integral_error = (
+                integral_error
+                + dt * e_position
         )
 
         estimates.zeta_hat = (
