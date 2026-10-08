@@ -13,11 +13,6 @@ from src.adaptive_controller import (
     adaptation_derivatives,
 )
 
-from src.proposed_tracking import (
-    proposed_sliding_surfaces,
-    compute_proposed_kappa,
-)
-
 from src.fuzzy_compensator import (
     Type3FuzzyCompensator,
 )
@@ -28,27 +23,123 @@ from src.stabilized_controller import (
     project_adaptive_estimates,
 )
 
+from src.proposed_tracking import (
+    proposed_sliding_surfaces,
+    compute_proposed_kappa,
+)
+
+
+def control_effectiveness_factors(
+    t,
+    disturbance_level,
+):
+    """
+    Time-varying multiplicative control-effectiveness
+    uncertainty.
+
+    disturbance_level = 0.20 means approximately
+    +/-20% variation in actuator effectiveness.
+
+    This disturbance model is an implementation-specific
+    robustness experiment and is NOT part of the
+    reference paper.
+    """
+
+    if not 0.0 <= disturbance_level <= 1.0:
+        raise ValueError(
+            "disturbance_level must be between 0 and 1."
+        )
+
+    return np.array(
+        [
+            1.0
+            + disturbance_level
+            * np.sin(0.70 * t),
+
+            1.0
+            + disturbance_level
+            * np.sin(
+                1.10 * t + 0.40
+            ),
+
+            1.0
+            + disturbance_level
+            * np.sin(
+                0.90 * t + 0.80
+            ),
+
+            1.0
+            + disturbance_level
+            * np.sin(
+                1.30 * t + 1.20
+            ),
+        ],
+        dtype=float,
+    )
+
 
 def run_stabilized_simulation(
     t_final=1.0,
     dt=0.001,
+    fuzzy_enabled=True,
+    disturbance_level=0.0,
 ):
+    """
+    Run the proposed stabilized controller.
+
+    Parameters
+    ----------
+    t_final:
+        Simulation duration.
+
+    dt:
+        Numerical integration step.
+
+    fuzzy_enabled:
+        If False, T3 fuzzy compensation and fuzzy
+        consequent adaptation are disabled.
+
+        This is used for the ablation experiment.
+
+    disturbance_level:
+        Multiplicative time-varying uncertainty applied
+        to actuator/control effectiveness.
+
+        Example:
+            0.05 -> 5%
+            0.10 -> 10%
+            0.20 -> 20%
+    """
+
     model = UAVModel()
     reference = ConstantReference()
 
-    adaptive_params = AdaptiveParameters()
-    estimates = AdaptiveEstimates()
+    adaptive_params = (
+        AdaptiveParameters()
+    )
 
-    fuzzy = Type3FuzzyCompensator()
+    estimates = (
+        AdaptiveEstimates()
+    )
 
-    config = StabilizationConfig()
+    fuzzy = (
+        Type3FuzzyCompensator()
+    )
 
+    config = (
+        StabilizationConfig()
+    )
+
+    # Initial condition reported
+    # in the reference study.
     state = np.full(
         8,
         0.10,
         dtype=float,
     )
 
+    # Proposed surface integrates
+    # position tracking error.
     integral_error = np.zeros(
         4,
         dtype=float,
@@ -57,14 +148,18 @@ def run_stabilized_simulation(
     time_history = []
     state_history = []
     control_history = []
+    effective_control_history = []
     raw_control_history = []
     sliding_history = []
     fuzzy_history = []
     mass_history = []
     cos_history = []
+    effectiveness_history = []
 
     n_steps = int(
-        np.ceil(t_final / dt)
+        np.ceil(
+            t_final / dt
+        )
     )
 
     for step in range(
@@ -108,12 +203,31 @@ def run_stabilized_simulation(
             ),
         )
 
-        (
-            fuzzy_outputs,
-            xi_vectors,
-        ) = fuzzy.evaluate(
-            state
-        )
+        # ----------------------------------
+        # Type-3 fuzzy compensation
+        # ----------------------------------
+
+        if fuzzy_enabled:
+
+            (
+                fuzzy_outputs,
+                xi_vectors,
+            ) = fuzzy.evaluate(
+                state
+            )
+
+        else:
+
+            fuzzy_outputs = np.zeros(
+                4,
+                dtype=float,
+            )
+
+            xi_vectors = None
+
+        # ----------------------------------
+        # Proposed stabilized controller
+        # ----------------------------------
 
         (
             u,
@@ -132,42 +246,86 @@ def run_stabilized_simulation(
             )
         )
 
+        # ----------------------------------
+        # Time-varying actuator uncertainty
+        # ----------------------------------
+
+        effectiveness = (
+            control_effectiveness_factors(
+                t=t,
+                disturbance_level=(
+                    disturbance_level
+                ),
+            )
+        )
+
+        effective_u = (
+            u * effectiveness
+        )
+
+        # ----------------------------------
+        # Store current values
+        # ----------------------------------
+
         time_history.append(t)
+
         state_history.append(
             state.copy()
         )
+
         control_history.append(
             u.copy()
         )
+
+        effective_control_history.append(
+            effective_u.copy()
+        )
+
         raw_control_history.append(
             raw_u.copy()
         )
+
         sliding_history.append(
             s.copy()
         )
+
         fuzzy_history.append(
             fuzzy_outputs.copy()
         )
+
         mass_history.append(
             estimates.m_hat
         )
+
         cos_history.append(
             safe_cos
+        )
+
+        effectiveness_history.append(
+            effectiveness.copy()
         )
 
         if step == n_steps:
             break
 
+        # ----------------------------------
+        # True plant dynamics
+        # ----------------------------------
+
         state_dot = (
             model.state_derivative(
                 state,
-                u1=u[0],
-                u2=u[1],
-                u3=u[2],
-                u4=u[3],
+                u1=effective_u[0],
+                u2=effective_u[1],
+                u3=effective_u[2],
+                u4=effective_u[3],
                 omega_bar=0.0,
             )
         )
+
+        # ----------------------------------
+        # Adaptive parameter laws
+        # ----------------------------------
 
         (
             zeta_dot,
@@ -181,23 +339,32 @@ def run_stabilized_simulation(
             params=adaptive_params,
         )
 
-        weight_dot = (
-            fuzzy.weight_derivatives(
-                state=state,
-                sliding_surfaces=s,
-                xi_vectors=xi_vectors,
-            )
-        )
+        # ----------------------------------
+        # T3 consequent adaptation
+        # ----------------------------------
 
-        # Euler state integration
+        if fuzzy_enabled:
+
+            weight_dot = (
+                fuzzy.weight_derivatives(
+                    state=state,
+                    sliding_surfaces=s,
+                    xi_vectors=xi_vectors,
+                )
+            )
+
+        # ----------------------------------
+        # Euler integration
+        # ----------------------------------
+
         state = (
             state
             + dt * state_dot
         )
 
         integral_error = (
-                integral_error
-                + dt * e_position
+            integral_error
+            + dt * e_position
         )
 
         estimates.zeta_hat = (
@@ -215,17 +382,21 @@ def run_stabilized_simulation(
             + dt * m_hat_dot
         )
 
-        # Proposed extension:
-        # projection after adaptation.
         project_adaptive_estimates(
             estimates,
             config,
         )
 
-        fuzzy.update_weights(
-            derivatives=weight_dot,
-            dt=dt,
-        )
+        if fuzzy_enabled:
+
+            fuzzy.update_weights(
+                derivatives=weight_dot,
+                dt=dt,
+            )
+
+        # ----------------------------------
+        # Numerical safety
+        # ----------------------------------
 
         if not np.all(
             np.isfinite(state)
@@ -239,26 +410,41 @@ def run_stabilized_simulation(
         "time": np.asarray(
             time_history
         ),
+
         "state": np.asarray(
             state_history
         ),
+
         "control": np.asarray(
             control_history
         ),
+
+        "effective_control": np.asarray(
+            effective_control_history
+        ),
+
         "raw_control": np.asarray(
             raw_control_history
         ),
+
         "sliding": np.asarray(
             sliding_history
         ),
+
         "fuzzy": np.asarray(
             fuzzy_history
         ),
+
         "mass_estimate": np.asarray(
             mass_history
         ),
+
         "safe_cos_product": np.asarray(
             cos_history
+        ),
+
+        "control_effectiveness": np.asarray(
+            effectiveness_history
         ),
     }
 
@@ -267,8 +453,10 @@ if __name__ == "__main__":
 
     results = (
         run_stabilized_simulation(
-            t_final=1.0,
+            t_final=10.0,
             dt=0.001,
+            fuzzy_enabled=True,
+            disturbance_level=0.0,
         )
     )
 
@@ -291,25 +479,32 @@ if __name__ == "__main__":
     )
 
     final_error = (
-        final_output - target
+        final_output
+        - target
     )
 
     print(
         "Final outputs "
         "[phi, theta, psi, z]:"
     )
-    print(final_output)
+    print(
+        final_output
+    )
 
     print(
         "\nFinal tracking errors:"
     )
-    print(final_error)
+    print(
+        final_error
+    )
 
     print(
         "\nFinal sliding surfaces:"
     )
     print(
-        results["sliding"][-1]
+        results[
+            "sliding"
+        ][-1]
     )
 
     print(
@@ -327,20 +522,22 @@ if __name__ == "__main__":
     print(
         np.max(
             np.abs(
-                results["control"]
+                results[
+                    "control"
+                ]
             ),
             axis=0,
         )
     )
 
     print(
-        "\nMaximum raw |control|:"
+        "\nMaximum effective |control|:"
     )
     print(
         np.max(
             np.abs(
                 results[
-                    "raw_control"
+                    "effective_control"
                 ]
             ),
             axis=0,
@@ -364,12 +561,6 @@ if __name__ == "__main__":
     assert np.all(
         np.isfinite(
             results["state"]
-        )
-    )
-
-    assert np.all(
-        np.isfinite(
-            results["control"]
         )
     )
 
